@@ -22,6 +22,8 @@ Huge thanks to [Itay Yashar](https://www.linkedin.com/in/itay-yashar-55586a163/)
 - **Features**:
   - Handles large domains with `-SplitSearch`, `-Recurse`, and `-LetterSplitSearch` options.
   - Enumerates certificates with the `-Certificates` flag.
+  - **Resumable enumeration** - Automatic checkpointing that survives interruptions.
+  - **3-letter splitting** - Handles dense prefixes that timeout at 2-letter level.
 
 ### ShadowHound-DS.ps1
 
@@ -84,6 +86,28 @@ ShadowHound-ADM -OutputFilePath "C:\Results\ldap_output.txt" -SplitSearch -Lette
 - **`-SplitSearch`**: Splits the search across top-level containers.
 - **`-Recurse`**: Recurses into containers that fail to return results.
 - **`-LetterSplitSearch`**: Further splits searches by the first letter of CN.
+
+### Resumable Enumeration (ShadowHound-ADM.ps1)
+
+Enumeration automatically saves progress. If interrupted (network drop, Ctrl+C, session killed), just run the same command again - it picks up where it left off.
+
+```powershell
+# Start enumeration
+ShadowHound-ADM -Server dc.corp.local -OutputFilePath output.txt -LetterSplitSearch
+
+# Gets interrupted...
+
+# Resume automatically
+ShadowHound-ADM -Server dc.corp.local -OutputFilePath output.txt -LetterSplitSearch
+```
+
+**New parameters:**
+- **`-DisableStateFile`**: No checkpoints (OPSEC - no artifacts)
+- **`-StartFromLetter <char>`**: Skip ahead (e.g. `-StartFromLetter "m"`)
+- **`-KeepStateFile`**: Preserve state file after completion
+- **`-StateFile <path>`**: Custom state file location
+
+For more details on resumable enumeration and 3-letter splitting, see the [feature PR](https://github.com/Friends-Security/ShadowHound/pull/XX).
 
 ## Converting Data for BloodHound
 

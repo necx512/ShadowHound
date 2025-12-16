@@ -1,0 +1,10 @@
+# Test outputs and state files
+*.txt
+*.state.json
+
+# Documentation except README
+*.md
+!README.md
+
+# Keep split_output.py
+!split_output.py
