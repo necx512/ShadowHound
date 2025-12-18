@@ -331,6 +331,13 @@ function ShadowHound-ADM {
                         # Process the container
                         Perform-ADQuery -SearchParams $containerSearchParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
                         $processedContainers += $containerDN
+                        
+                        # Checkpoint after successful container query
+                        if ($stateEnabled -and $stateData) {
+                            $stateData.completedContainers += $containerDN
+                            $stateData.objectCount = $count.Value
+                            Write-StateFile -State $stateData -Path $statePath
+                        }
                     } catch {
                         Write-Error "[-] Error processing container '$containerDN': $_"
                         $unprocessedContainers += $containerDN
@@ -339,7 +346,10 @@ function ShadowHound-ADM {
                 } elseif ($LetterSplitSearch -eq $true) {
 
                     # Split the search by first letter
+                    # Top-level charset excludes . and - to avoid garbage queries
                     $charset = ([char[]](97..122) + [char[]](48..57) + '!', '_', '@', '$', '{', '}')
+                    # Full charset for 2-letter and 3-letter splits includes . and - for edge cases
+                    $charsetFull = $charset + '.', '-'
                     $OriginalFilter = $containerSearchParams['LdapFilter']
                     
                     # Determine starting letter for this container
@@ -396,7 +406,7 @@ function ShadowHound-ADM {
                                 Write-Output "  [*] Starting from double-letter '$StartFromLetter' as requested..."
                             }
                             
-                            $subCharset = $charset[$subStartIdx..($charset.Length-1)]
+                            $subCharset = $charsetFull[$subStartIdx..($charsetFull.Length-1)]
                             foreach ($subChar in $subCharset) {
                                 $doubleChar = "$charStr$subChar"
                                 
@@ -578,7 +588,10 @@ function ShadowHound-ADM {
                 Write-Output ''
             }
         } elseif ($LetterSplitSearch -eq $true -and $SplitSearch -eq $false) {
+            # Top-level charset excludes . and - to avoid garbage queries
             $charset = ([char[]](97..122) + [char[]](48..57) + '!', '_', '@', '$', '{', '}')
+            # Full charset for 2-letter and 3-letter splits includes . and - for edge cases
+            $charsetFull = $charset + '.', '-'
             $OriginalFilter = $getAdObjectParams['LdapFilter']
             $globalKey = 'global'
             
@@ -631,7 +644,7 @@ function ShadowHound-ADM {
                         Write-Output "  [*] Starting from double-letter '$StartFromLetter' as requested..."
                     }
                     
-                    $subCharset = $charset[$subStartIdx..($charset.Length-1)]
+                    $subCharset = $charsetFull[$subStartIdx..($charsetFull.Length-1)]
                     foreach ($subChar in $subCharset) {
                         $doubleChar = "$charStr$subChar"
                         $isRetry = $false
@@ -658,7 +671,7 @@ function ShadowHound-ADM {
                             Write-Output "    [+] Letter '$doubleChar' has 3-letter subletters, iterating those..."
                             
                             # Iterate all 3-letter combinations for this 2-letter prefix
-                            foreach ($tripleChar in $charset) {
+                            foreach ($tripleChar in $charsetFull) {
                                 $triplePrefix = "$doubleChar$tripleChar"
                                 
                                 # Check if already completed
@@ -731,9 +744,9 @@ function ShadowHound-ADM {
                             $tripleSuccess = $false
                             $failedBatches = @()
                             
-                            for ($batchIdx = 0; $batchIdx -lt $charset.Length; $batchIdx += $batchSize) {
-                                $batchEnd = [Math]::Min($batchIdx + $batchSize - 1, $charset.Length - 1)
-                                $batch = $charset[$batchIdx..$batchEnd]
+                            for ($batchIdx = 0; $batchIdx -lt $charsetFull.Length; $batchIdx += $batchSize) {
+                                $batchEnd = [Math]::Min($batchIdx + $batchSize - 1, $charsetFull.Length - 1)
+                                $batch = $charsetFull[$batchIdx..$batchEnd]
                                 
                                 $orFilters = @()
                                 foreach ($tripleChar in $batch) {
@@ -840,7 +853,7 @@ function ShadowHound-ADM {
                 } catch {
                     Write-Output "   [!!] Error processing character '$charStr*': $_"
                     Write-Output '        Trying to split each letter again...'
-                    $subCharset = $charset
+                    $subCharset = $charsetFull
                     foreach ($subChar in $subCharset) {
                         $doubleChar = "$charStr$subChar"
                         $isRetry = $false
@@ -867,7 +880,7 @@ function ShadowHound-ADM {
                             Write-Output "    [+] Letter '$doubleChar' has 3-letter subletters, iterating those..."
                             
                             # Iterate all 3-letter combinations for this 2-letter prefix
-                            foreach ($tripleChar in $charset) {
+                            foreach ($tripleChar in $charsetFull) {
                                 $triplePrefix = "$doubleChar$tripleChar"
                                 
                                 # Check if already completed
@@ -940,9 +953,9 @@ function ShadowHound-ADM {
                             $tripleSuccess = $false
                             $failedBatches = @()
                             
-                            for ($batchIdx = 0; $batchIdx -lt $charset.Length; $batchIdx += $batchSize) {
-                                $batchEnd = [Math]::Min($batchIdx + $batchSize - 1, $charset.Length - 1)
-                                $batch = $charset[$batchIdx..$batchEnd]
+                            for ($batchIdx = 0; $batchIdx -lt $charsetFull.Length; $batchIdx += $batchSize) {
+                                $batchEnd = [Math]::Min($batchIdx + $batchSize - 1, $charsetFull.Length - 1)
+                                $batch = $charsetFull[$batchIdx..$batchEnd]
                                 
                                 $orFilters = @()
                                 foreach ($tripleChar in $batch) {
