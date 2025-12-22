@@ -774,7 +774,7 @@ function ShadowHound-ADM {
                                         Write-StateFile -State $stateData -Path $statePath
                                     }
                                 } catch {
-                                    Write-Output "   [-] Batch failed, retrying individually..."
+                                    Write-Output "   [-] Batch failed - will retry failed batch individually after completing remaining batches"
                                     $failedBatches += ,@($batch)
                                 }
                             }
@@ -983,7 +983,7 @@ function ShadowHound-ADM {
                                         Write-StateFile -State $stateData -Path $statePath
                                     }
                                 } catch {
-                                    Write-Output "   [-] Batch failed, retrying individually..."
+                                    Write-Output "   [-] Batch failed - will retry failed batch individually after completing remaining batches"
                                     $failedBatches += ,@($batch)
                                 }
                             }
