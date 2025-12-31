@@ -107,7 +107,7 @@ ShadowHound-ADM -Server dc.corp.local -OutputFilePath output.txt -LetterSplitSea
 - **`-KeepStateFile`**: Preserve state file after completion
 - **`-StateFile <path>`**: Custom state file location
 
-For more details on resumable enumeration and 3-letter splitting, see the [feature PR](https://github.com/Friends-Security/ShadowHound/pull/XX).
+For more details on resumable enumeration and 3-letter splitting, see the [feature PR](https://github.com/Friends-Security/ShadowHound/pull/4).
 
 ## Converting Data for BloodHound
 
