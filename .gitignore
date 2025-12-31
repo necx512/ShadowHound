@@ -2,7 +2,9 @@
 *.txt
 *.state.json
 
-# Documentation except README
+# Tooling/config (local only)
+.github/
+
 *.md
 !README.md
 

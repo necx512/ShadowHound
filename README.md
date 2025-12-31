@@ -114,18 +114,17 @@ For more details on resumable enumeration and 3-letter splitting, see the [featu
 If the ldap_output.txt you got using ShadowHound is too large for Bofhound (Memory error), you may split the ShadowHound output using split_output.py:
 ```bash
 # Split ldap_output.txt to 100 chunks which are named split_output_1.txt, split_output_2.txt and so on...
-# In order to provide bofhound with a folder containing ldap output, the files *must* be prefixed with "pyldapsearch".
+# In order to provide bofhound with a folder containing ldap output, the files *must* be with .log extension.
 python3 split_output.py -i ldap_output.txt -o pyldapsearch_ldap -n 100
 
 # Provide Shadowhound with a folder containing the splitted output
 python3 bofhound.py -i ./folder -p All --parser ldapsearch
-
 ```
 
 After collecting data, use [BofHound](https://github.com/coffeegist/bofhound) to convert it into BloodHound-compatible JSON files:
 
 ```bash
-python3 bofhound.py -i ldap_output.txt -p All --parser ldapsearch
+python3 bofhound.py -i ldap_output.log -p All --parser ldapsearch
 ```
 
 For large JSON files (>100MB), consider splitting them with tools like [ShredHound](https://github.com/ustayready/ShredHound).
