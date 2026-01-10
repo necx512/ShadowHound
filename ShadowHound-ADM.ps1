@@ -350,10 +350,18 @@ function ShadowHound-ADM {
                     continue
                 }
 
+                # Check if this container is being retried from a previous failure
+                $isContainerRetry = $stateEnabled -and $stateData -and $stateData.failedContainers -and $stateData.failedContainers -contains $containerDN
+
                 $containerSearchParams = $getAdObjectParams.Clone()
                 $containerSearchParams['SearchBase'] = $containerDN
 
-                Write-Output "[*] Processing container ($($processedContainers.Count + $unprocessedContainers.Count + 1)/$($topLevelContainers.Count)): $containerDN"
+                if ($isContainerRetry) {
+                    Write-Output "[*] Retrying previously failed container ($($processedContainers.Count + $unprocessedContainers.Count + 1)/$($topLevelContainers.Count)): $containerDN"
+                }
+                else {
+                    Write-Output "[*] Processing container ($($processedContainers.Count + $unprocessedContainers.Count + 1)/$($topLevelContainers.Count)): $containerDN"
+                }
 
                 if ($LetterSplitSearch -eq $false) {
                     try {
@@ -364,6 +372,12 @@ function ShadowHound-ADM {
                         # Checkpoint after successful container query
                         if ($stateEnabled -and $stateData) {
                             $stateData.completedContainers += $containerDN
+
+                            # Remove from failedContainers if it was previously failed (retry success)
+                            if ($stateData.failedContainers -and $stateData.failedContainers -contains $containerDN) {
+                                $stateData.failedContainers = @($stateData.failedContainers | Where-Object { $_ -ne $containerDN })
+                            }
+
                             $stateData.objectCount = $count.Value
                             Write-StateFile -State $stateData -Path $statePath
                         }
@@ -371,6 +385,16 @@ function ShadowHound-ADM {
                     catch {
                         Write-Error "[-] Error processing container '$containerDN': $_"
                         $unprocessedContainers += $containerDN
+
+                        # Persist container failure to state file
+                        if ($stateEnabled -and $stateData) {
+                            if (-not $stateData.failedContainers) { $stateData.failedContainers = @() }
+                            if (-not ($stateData.failedContainers -contains $containerDN)) {
+                                $stateData.failedContainers += $containerDN
+                            }
+                            $stateData.objectCount = $count.Value
+                            Write-StateFile -State $stateData -Path $statePath
+                        }
                         continue
                     }
                 }
@@ -1193,10 +1217,12 @@ function ShadowHound-ADM {
     # State cleanup on completion
     if ($stateEnabled -and $statePath -and -not $KeepStateFile) {
         # Only remove state file if no failures occurred (letter or container)
-        $hasFailures = ($stateData -and $stateData.failedLetters -and $stateData.failedLetters.Count -gt 0) -or ($unprocessedContainers -and $unprocessedContainers.Count -gt 0)
-        
+        $failedContainerCount = if ($stateData -and $stateData.failedContainers) { $stateData.failedContainers.Count } else { 0 }
+        $failedLetterCount = if ($stateData -and $stateData.failedLetters) { $stateData.failedLetters.Count } else { 0 }
+        $hasFailures = ($failedLetterCount -gt 0) -or ($failedContainerCount -gt 0)
+
         if ($hasFailures) {
-            Write-Output "[*] State file preserved due to failed items ($($unprocessedContainers.Count) containers, $($stateData.failedLetters.Count) letters): $statePath"
+            Write-Output "[*] State file preserved due to failed items ($failedContainerCount containers, $failedLetterCount letters): $statePath"
         }
         else {
             Write-Output '[*] Enumeration complete, removing state file...'
@@ -1680,6 +1706,7 @@ function Initialize-StateFile {
         executionMode       = $mode
         ldapFilter          = if ($LdapFilter) { $LdapFilter } else { '(objectGuid=*)' }
         completedContainers = @()
+        failedContainers    = @()
         completedLetters    = @()
         failedLetters       = @{}
         objectCount         = 0
@@ -1837,6 +1864,15 @@ function Show-StatePrompt {
         [Console]::WriteLine("    - Objects enumerated: $objCount")
     }
     
+    $failedContainers = $State['failedContainers']
+    if ($failedContainers -and $failedContainers.Count -gt 0) {
+        [Console]::WriteLine('')
+        [Console]::WriteLine('[!] Failed containers detected (will be retried on resume):')
+        foreach ($fc in $failedContainers) {
+            [Console]::WriteLine("    - $fc")
+        }
+    }
+
     $failedLetters = $State['failedLetters']
     if ($failedLetters -and $failedLetters.Count -gt 0) {
         [Console]::WriteLine('')
