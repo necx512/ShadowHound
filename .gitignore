@@ -1,0 +1,12 @@
+# Test outputs and state files
+*.txt
+*.state.json
+
+# Tooling/config (local only)
+.github/
+
+*.md
+!README.md
+
+# Keep split_output.py
+!split_output.py

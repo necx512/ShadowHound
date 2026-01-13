@@ -15,7 +15,7 @@ function ShadowHound-ADM {
         [string]$SearchBase,
 
         [Parameter(Mandatory = $false, HelpMessage = 'The number of objects to include in one page for paging LDAP searches.')]
-        [int]$PageSize = 1000,
+        [int]$PageSize = 500,
 
         [Parameter(Mandatory = $false, HelpMessage = 'PSCredential object for alternate credentials.')]
         [pscredential]$Credential,
@@ -35,6 +35,19 @@ function ShadowHound-ADM {
         [Parameter(Mandatory = $false, HelpMessage = 'Enumerate certificates.')]
         [switch]$Certificates,
 
+        [Parameter(Mandatory = $false, HelpMessage = 'Path to state file for checkpoint tracking.')]
+        [string]$StateFile,
+
+        [Parameter(Mandatory = $false, HelpMessage = 'Start enumeration from a specific letter or two-letter prefix (max 2 chars).')]
+        [ValidateScript({ if ($null -ne $_ -and $_.Length -gt 2) { throw 'StartFromLetter must be maximum 2 characters.' } $true })]
+        [string]$StartFromLetter,
+
+        [Parameter(Mandatory = $false, HelpMessage = 'Disable state file functionality.')]
+        [switch]$DisableStateFile,
+
+        [Parameter(Mandatory = $false, HelpMessage = 'Keep state file after successful completion.')]
+        [switch]$KeepStateFile,
+
         [Parameter(Mandatory = $false, HelpMessage = 'Display help information.')]
         [switch]$Help
     )
@@ -45,12 +58,23 @@ function ShadowHound-ADM {
     }
 
     if ($Certificates -and ($SplitSearch -or $LetterSplitSearch -or $Recurse -or $ParsedContainers -or $SearchBase)) { 
-        Write-Error '[!] Certificate enumeration is done seprately from the rest of the enumeration.'
+        Write-Error '[!] Certificate enumeration is done separately from the rest of the enumeration.'
         return
     }
 
     if (-not $OutputFilePath) {
         Write-Error '[!] -OutputFilePath is required.'
+        return
+    }
+
+    $parentDir = Split-Path -Path $OutputFilePath -Parent
+    if ($parentDir -and -not (Test-Path -Path $parentDir)) {
+        Write-Error "[!] The directory for OutputFilePath does not exist: $parentDir"
+        return
+    }
+
+    if ($StartFromLetter -and -not $LetterSplitSearch) {
+        Write-Error '[!] -StartFromLetter requires -LetterSplitSearch to be enabled.'
         return
     }
 
@@ -72,7 +96,7 @@ function ShadowHound-ADM {
 
     Print-Logo
     Write-Output '[+] Executing with the following parameters:'
-    if ($server) { Write-Output "   - Server: $Server" }
+    if ($Server) { Write-Output "   - Server: $Server" }
     Write-Output "   - OutputFilePath: $OutputFilePath"
     if ($LdapFilter) { Write-Output "   - LdapFilter: $LdapFilter" }
     if ($SearchBase) { Write-Output "   - SearchBase: $SearchBase" }
@@ -81,7 +105,11 @@ function ShadowHound-ADM {
     if ($Recurse) { Write-Output '   - Recurse enabled' }
     if ($Credential) { Write-Output "   - Credential: $($Credential.UserName)" }
     if ($ParsedContainers) { Write-Output "   - ParsedContainers: $ParsedContainers" }
+    if ($StartFromLetter) { Write-Output "   - StartFromLetter: $StartFromLetter" }
+    if ($DisableStateFile) { Write-Output '   - StateFile: disabled' } elseif ($StateFile) { Write-Output "   - StateFile: $StateFile" }
     if ($Certificates) { Write-Output '   - Enumerating certificates' }
+
+    
 
 
     $count = [ref]0
@@ -97,6 +125,128 @@ function ShadowHound-ADM {
     if ($SearchBase) { $getAdObjectParams['SearchBase'] = $SearchBase }
     if ($Credential) { $getAdObjectParams['Credential'] = $Credential }
     if ($PageSize) { $getAdObjectParams['ResultPageSize'] = $PageSize }
+
+    # State file handling
+    $stateEnabled = $true
+    if ($DisableStateFile) { $stateEnabled = $false }
+    $statePath = $null
+    if ($stateEnabled) {
+        if ($StateFile) { $statePath = $StateFile } else { $statePath = "$OutputFilePath.state.json" }
+        $resumeChoice = $null
+        if (Test-StateFileExists -Path $statePath) {
+            $existingState = Read-StateFile -Path $statePath
+            
+            # Handle corrupted state file
+            if ($null -eq $existingState) {
+                Write-Output ''
+                Write-Output '[!] WARNING: State file exists but is corrupted or unreadable.'
+                Write-Output "[!] Path: $statePath"
+                Write-Output ''
+                while ($true) {
+                    $corruptChoice = Read-Host '[?] Delete corrupted state file and start fresh? [Y]es, [C]ancel'
+                    $corruptChoice = $corruptChoice.Trim().ToUpper()
+                    if ($corruptChoice -eq 'Y' -or $corruptChoice -eq 'YES') {
+                        Write-Output '[+] Deleting corrupted state file and starting fresh...'
+                        Remove-StateFile -Path $statePath
+                        $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch
+                        break
+                    }
+                    elseif ($corruptChoice -eq 'C' -or $corruptChoice -eq 'CANCEL') {
+                        Write-Output '[-] Cancelled by user'
+                        return
+                    }
+                    else {
+                        Write-Output '[!] Invalid input. Please enter Y or C.'
+                    }
+                }
+            }
+            elseif ($existingState['toolMethod'] -and $existingState['toolMethod'] -ne 'ShadowHound-ADM') {
+                Write-Output ''
+                Write-Output "[!] WARNING: State file was created with $($existingState['toolMethod'])."
+                Write-Output '[!] Resuming with ShadowHound-ADM is not possible.'
+                Write-Output "[!] Path: $statePath"
+                Write-Output ''
+                while ($true) {
+                    $toolChoice = Read-Host '[?] Delete state file and start fresh? [Y]es, [C]ancel'
+                    $toolChoice = $toolChoice.Trim().ToUpper()
+                    if ($toolChoice -eq 'Y' -or $toolChoice -eq 'YES') {
+                        Write-Output '[+] Deleting state file and starting fresh...'
+                        Remove-StateFile -Path $statePath
+                        $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch
+                        break
+                    }
+                    elseif ($toolChoice -eq 'C' -or $toolChoice -eq 'CANCEL') {
+                        Write-Output '[-] Cancelled by user'
+                        return
+                    }
+                    else {
+                        Write-Output '[!] Invalid input. Please enter Y or C.'
+                    }
+                }
+            }
+            elseif ($existingState['executionMode']) {
+                # Check execution mode compatibility
+                $currentMode = 'Standard'
+                if ($SplitSearch -and $LetterSplitSearch) {
+                    $currentMode = 'SplitSearch+LetterSplitSearch'
+                }
+                elseif ($SplitSearch) {
+                    $currentMode = 'SplitSearch'
+                }
+                elseif ($LetterSplitSearch) {
+                    $currentMode = 'LetterSplitSearch'
+                }
+                
+                if ($existingState['executionMode'] -ne $currentMode) {
+                    Write-Output ''
+                    Write-Output "[!] WARNING: State file execution mode mismatch."
+                    Write-Output "[!] State file mode: $($existingState['executionMode'])"
+                    Write-Output "[!] Current execution mode: $currentMode"
+                    Write-Output '[!] Resuming with mismatched modes will cause data integrity issues.'
+                    Write-Output "[!] Path: $statePath"
+                    Write-Output ''
+                    while ($true) {
+                        $modeChoice = Read-Host '[?] Delete state file and start fresh? [Y]es, [C]ancel'
+                        $modeChoice = $modeChoice.Trim().ToUpper()
+                        if ($modeChoice -eq 'Y' -or $modeChoice -eq 'YES') {
+                            Write-Output '[+] Deleting state file and starting fresh...'
+                            Remove-StateFile -Path $statePath
+                            $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch
+                            break
+                        }
+                        elseif ($modeChoice -eq 'C' -or $modeChoice -eq 'CANCEL') {
+                            Write-Output '[-] Cancelled by user'
+                            return
+                        }
+                        else {
+                            Write-Output '[!] Invalid input. Please enter Y or C.'
+                        }
+                    }
+                }
+                else {
+                    $resumeChoice = Show-StatePrompt -State $existingState -Path $statePath
+                    switch ($resumeChoice) {
+                        'Y' { $stateData = $existingState }
+                        'N' { Remove-StateFile -Path $statePath; $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch }
+                        'C' { return }
+                        default { $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch }
+                    }
+                }
+            }
+            else {
+                $resumeChoice = Show-StatePrompt -State $existingState -Path $statePath
+                switch ($resumeChoice) {
+                    'Y' { $stateData = $existingState }
+                    'N' { Remove-StateFile -Path $statePath; $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch }
+                    'C' { return }
+                    default { $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch }
+                }
+            }
+        }
+        else {
+            $stateData = Initialize-StateFile -Path $statePath -Output $OutputFilePath -Server $Server -LdapFilter $LdapFilter -SearchBase $SearchBase -SplitSearch $SplitSearch -LetterSplitSearch $LetterSplitSearch
+        }
+    }
 
     # Open StreamWriter
     $streamWriter = New-Object System.IO.StreamWriter($OutputFilePath, $true, [System.Text.Encoding]::UTF8)
@@ -129,11 +279,13 @@ function ShadowHound-ADM {
             $getAdObjectParams['LdapFilter'] = '(objectclass=msPKI-Enterprise-Oid)'
             Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
 
-        } elseif ($SplitSearch -eq $false -and $LetterSplitSearch -eq $false) {
+        }
+        elseif ($SplitSearch -eq $false -and $LetterSplitSearch -eq $false) {
 
             Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
 
-        } elseif ($SplitSearch -eq $true) {
+        }
+        elseif ($SplitSearch -eq $true) {
             # Get top-level containers
             Write-Output "[*] Discovering top level containers for $Server..."
             $topLevelContainers = Get-TopLevelContainers -Params $getAdObjectParams
@@ -148,7 +300,7 @@ function ShadowHound-ADM {
                 LdapFilter = '(objectClass=domain)'
             }
 
-            if ($server) { $dcSearchParams['Server'] = $Server }
+            if ($Server) { $dcSearchParams['Server'] = $Server }
             if ($Credential) { $dcSearchParams['Credential'] = $Credential }
 
             Perform-ADQuery -SearchParams $dcSearchParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
@@ -175,55 +327,268 @@ function ShadowHound-ADM {
 
             if ($ParsedContainers) {
                 $ParsedContainersList = Get-Content -Path $ParsedContainers
-            } else {
+            }
+            else {
                 $ParsedContainersList = @()
             }
 
-            # process them containers
+            $isFirstContainer = $true
             foreach ($container in $topLevelContainers) {
                 $containerDN = $container.DistinguishedName
 
+                # Skip containers from ParsedContainers file
                 if ($ParsedContainersList -contains $containerDN) {
                     Write-Output "[+] Encountered already parsed container $containerDN, skipping..."
                     $processedContainers += $containerDN
                     continue
                 }
+                
+                # Skip already completed containers from state file
+                if ($stateEnabled -and $stateData -and $stateData.completedContainers -contains $containerDN) {
+                    Write-Output "[+] Container $containerDN already completed, skipping..."
+                    $processedContainers += $containerDN
+                    continue
+                }
+
+                # Check if this container is being retried from a previous failure
+                $isContainerRetry = $stateEnabled -and $stateData -and $stateData.failedContainers -and $stateData.failedContainers -contains $containerDN
 
                 $containerSearchParams = $getAdObjectParams.Clone()
                 $containerSearchParams['SearchBase'] = $containerDN
 
-                Write-Output "[*] Processing container ($($processedContainers.Count + $unprocessedContainers.Count + 1)/$($topLevelContainers.Count)): $containerDN"
+                if ($isContainerRetry) {
+                    Write-Output "[*] Retrying previously failed container ($($processedContainers.Count + $unprocessedContainers.Count + 1)/$($topLevelContainers.Count)): $containerDN"
+                }
+                else {
+                    Write-Output "[*] Processing container ($($processedContainers.Count + $unprocessedContainers.Count + 1)/$($topLevelContainers.Count)): $containerDN"
+                }
 
                 if ($LetterSplitSearch -eq $false) {
                     try {
                         # Process the container
                         Perform-ADQuery -SearchParams $containerSearchParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
                         $processedContainers += $containerDN
-                    } catch {
+                        
+                        # Checkpoint after successful container query
+                        if ($stateEnabled -and $stateData) {
+                            $stateData.completedContainers += $containerDN
+
+                            # Remove from failedContainers if it was previously failed (retry success)
+                            if ($stateData.failedContainers -and $stateData.failedContainers -contains $containerDN) {
+                                $stateData.failedContainers = @($stateData.failedContainers | Where-Object { $_ -ne $containerDN })
+                            }
+
+                            $stateData.objectCount = $count.Value
+                            Write-StateFile -State $stateData -Path $statePath
+                        }
+                    }
+                    catch {
                         Write-Error "[-] Error processing container '$containerDN': $_"
                         $unprocessedContainers += $containerDN
+
+                        # Persist container failure to state file
+                        if ($stateEnabled -and $stateData) {
+                            if (-not $stateData.failedContainers) { $stateData.failedContainers = @() }
+                            if (-not ($stateData.failedContainers -contains $containerDN)) {
+                                $stateData.failedContainers += $containerDN
+                            }
+                            $stateData.objectCount = $count.Value
+                            Write-StateFile -State $stateData -Path $statePath
+                        }
                         continue
                     }
-                } elseif ($LetterSplitSearch -eq $true) {
+                }
+                elseif ($LetterSplitSearch -eq $true) {
 
                     # Split the search by first letter
+                    # Top-level charset excludes . and - to avoid garbage queries
                     $charset = ([char[]](97..122) + [char[]](48..57) + '!', '_', '@', '$', '{', '}')
+                    # Full charset for 2-letter and 3-letter splits includes . and - for edge cases
+                    $charsetFull = $charset + '.', '-'
                     $OriginalFilter = $containerSearchParams['LdapFilter']
-                    foreach ($char in $charset) {
-                        Write-Output "  [*] Querying $containerDN for objects with CN starting with '$char'"
-                        $containerSearchParams['LdapFilter'] = "(&$OriginalFilter(cn=$char**))"
+                    
+                    # Determine starting letter for this container
+                    $startIdx = 0
+                    if ($stateEnabled -and $stateData -and $stateData.currentContainer -eq $containerDN -and $stateData.completedLetters) {
+                        # Resuming this container - use completed letters from state
+                        $completedSet = @($stateData.completedLetters)
+                    }
+                    elseif ($StartFromLetter -and $isFirstContainer) {
+                        # User specified starting letter - apply only to first container
+                        $completedSet = @()
+                        for ($i = 0; $i -lt $charset.Length; $i++) {
+                            if ($charset[$i] -eq $StartFromLetter[0]) {
+                                $startIdx = $i
+                                break
+                            }
+                        }
+                    }
+                    else {
+                        $completedSet = @()
+                    }
+                    
+                    foreach ($char in $charset[$startIdx..($charset.Length - 1)]) {
+                        $charStr = [string]$char
+                        
+                        # Skip if already completed
+                        if ($completedSet -contains $charStr) {
+                            Write-Output "  [+] Letter '$charStr' already completed, skipping..."
+                            continue
+                        }
+                        
+                        # Check if we have any subletters starting with this letter already completed
+                        $hasSubletters = $false
+                        foreach ($completed in $completedSet) {
+                            if ($completed.Length -eq 2 -and $completed[0] -eq $char) {
+                                $hasSubletters = $true
+                                break
+                            }
+                        }
+                        
+                        # Handle cases where we need to skip single letter and enumerate subletters:
+                        # 1. -StartFromLetter with 2-char prefix
+                        # 2. We have subletters in completedSet (resume scenario)
+                        if (($StartFromLetter -and $StartFromLetter.Length -eq 2 -and $charStr -eq $StartFromLetter[0]) -or $hasSubletters) {
+                            $subStartIdx = 0
+                            
+                            # Determine starting subletter index
+                            if ($StartFromLetter -and $StartFromLetter.Length -eq 2 -and $charStr -eq $StartFromLetter[0]) {
+                                # User specified a starting subletter
+                                for ($i = 0; $i -lt $charset.Length; $i++) {
+                                    if ($charset[$i] -eq $StartFromLetter[1]) {
+                                        $subStartIdx = $i
+                                        break
+                                    }
+                                }
+                                Write-Output "  [*] Starting from double-letter '$StartFromLetter' as requested..."
+                            }
+                            
+                            $subCharset = $charsetFull[$subStartIdx..($charsetFull.Length - 1)]
+                            foreach ($subChar in $subCharset) {
+                                $doubleChar = "$charStr$subChar"
+                                
+                                $isRetry = $false
+                                if ($stateEnabled -and $stateData -and $stateData.failedLetters[$containerDN] -and $stateData.failedLetters[$containerDN] -contains $doubleChar) {
+                                    $isRetry = $true
+                                    Write-Output "  [*] Retrying previously failed letter '$doubleChar' for $containerDN"
+                                }
+                                
+                                if (($completedSet -contains $doubleChar) -and -not $isRetry) {
+                                    Write-Output "    [+] Letter '$doubleChar' already completed, skipping..."
+                                    continue
+                                }
+                                
+                                try {
+                                    Write-Output "  [*] Querying $containerDN for objects with CN starting with '$doubleChar'"
+                                    $containerSearchParams['LdapFilter'] = "(&$OriginalFilter(cn=$doubleChar**))"
+                                    Perform-ADQuery -SearchParams $containerSearchParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                    
+                                    # Checkpoint after successful subletter query
+                                    if ($stateEnabled -and $stateData) {
+                                        if (-not ($stateData.completedLetters -contains $doubleChar)) {
+                                            $stateData.completedLetters += $doubleChar
+                                        }
+                                        
+                                        if ($stateData.failedLetters.ContainsKey($containerDN) -and $stateData.failedLetters[$containerDN] -contains $doubleChar) {
+                                            $stateData.failedLetters[$containerDN] = @($stateData.failedLetters[$containerDN] | Where-Object { $_ -ne $doubleChar })
+                                            if ($stateData.failedLetters[$containerDN].Count -eq 0) {
+                                                $stateData.failedLetters.Remove($containerDN)
+                                            }
+                                        }
+                                        
+                                        $stateData.currentContainer = $containerDN
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                }
+                                catch {
+                                    Write-Output "   [-] Failed to process (CN=$doubleChar*) for container '$containerDN': $_`nMoving to the next sub letter..."
+                                    
+                                    # Track failed letter for this container
+                                    if ($stateEnabled -and $stateData) {
+                                        if (-not $stateData.failedLetters[$containerDN]) {
+                                            $stateData.failedLetters[$containerDN] = @()
+                                        }
+                                        if ($stateData.failedLetters[$containerDN] -notcontains $doubleChar) {
+                                            $stateData.failedLetters[$containerDN] += $doubleChar
+                                        }
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                    continue
+                                }
+                            }
+                            continue
+                        }
+                        
+                        Write-Output "  [*] Querying $containerDN for objects with CN starting with '$charStr'"
+                        $containerSearchParams['LdapFilter'] = "(&$OriginalFilter(cn=$charStr*))"
 
                         try {
                             Perform-ADQuery -SearchParams $containerSearchParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
-                        } catch {
-                            Write-Output "   [!!] Error processing CN=$char* for container '$containerDN': $_`nTrying to split each letter again..."
-                            foreach ($subChar in $charset) {
+                            
+                            # Checkpoint after successful query
+                            if ($stateEnabled -and $stateData) {
+                                $stateData.completedLetters += $charStr
+                                $stateData.currentContainer = $containerDN
+                                $stateData.objectCount = $count.Value
+                                Write-StateFile -State $stateData -Path $statePath
+                            }
+                        }
+                        catch {
+                            Write-Output "   [!!] Error processing CN=$charStr* for container '$containerDN': $_`nTrying to split each letter again..."
+                            $subCharset = $charset
+                            foreach ($subChar in $subCharset) {
+                                $doubleChar = "$charStr$subChar"
+                                
+                                $isRetry = $false
+                                if ($stateEnabled -and $stateData -and $stateData.failedLetters[$containerDN] -and $stateData.failedLetters[$containerDN] -contains $doubleChar) {
+                                    $isRetry = $true
+                                    Write-Output "  [*] Retrying previously failed letter '$doubleChar' for $containerDN"
+                                }
+                                
+                                if (($completedSet -contains $doubleChar) -and -not $isRetry) {
+                                    Write-Output "    [+] Letter '$doubleChar' already completed, skipping..."
+                                    continue
+                                }
+                                
                                 try {
-                                    Write-Output "  [*] Querying $containerDN for objects with CN starting with '$char$subChar'"
-                                    $containerSearchParams['LdapFilter'] = "(&$OriginalFilter(cn=$char$subChar**))"
+                                    Write-Output "  [*] Querying $containerDN for objects with CN starting with '$doubleChar'"
+                                    $containerSearchParams['LdapFilter'] = "(&$OriginalFilter(cn=$doubleChar*))"
                                     Perform-ADQuery -SearchParams $containerSearchParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
-                                } catch {
-                                    Write-Output "   [-] Failed to process (CN=$char$subChar*) for container '$containerDN': $_`nMoving to the next sub letter..."
+                                    
+                                    # Checkpoint after successful subletter query
+                                    if ($stateEnabled -and $stateData) {
+                                        if (-not ($stateData.completedLetters -contains $doubleChar)) {
+                                            $stateData.completedLetters += $doubleChar
+                                        }
+                                        
+                                        if ($stateData.failedLetters.ContainsKey($containerDN) -and $stateData.failedLetters[$containerDN] -contains $doubleChar) {
+                                            $stateData.failedLetters[$containerDN] = @($stateData.failedLetters[$containerDN] | Where-Object { $_ -ne $doubleChar })
+                                            if ($stateData.failedLetters[$containerDN].Count -eq 0) {
+                                                $stateData.failedLetters.Remove($containerDN)
+                                            }
+                                        }
+                                        
+                                        $stateData.currentContainer = $containerDN
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                }
+                                catch {
+                                    Write-Output "   [-] Failed to process (CN=$doubleChar*) for container '$containerDN': $_`nMoving to the next sub letter..."
+                                    
+                                    # Track failed letter for this container
+                                    if ($stateEnabled -and $stateData) {
+                                        if (-not $stateData.failedLetters[$containerDN]) {
+                                            $stateData.failedLetters[$containerDN] = @()
+                                        }
+                                        if ($stateData.failedLetters[$containerDN] -notcontains $doubleChar) {
+                                            $stateData.failedLetters[$containerDN] += $doubleChar
+                                        }
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
                                     continue
                                 }
                             }
@@ -231,57 +596,647 @@ function ShadowHound-ADM {
                     }
 
                     $processedContainers += $containerDN
+                    $isFirstContainer = $false
+                    
+                    if ($stateEnabled -and $stateData) {
+                        $stateData.completedContainers += $containerDN
+                        $stateData.completedLetters = @()
+                        $stateData.currentContainer = $null
+                        Write-StateFile -State $stateData -Path $statePath
+                    }
                 }
             }
 
             # Output summary
             Write-Output "Processed $($count.Value) objects in total."
             if ($processedContainers.Count -gt 0) {
-                Write-Output '[+] Successfully processed containers:'
-                $processedContainers | ForEach-Object { Write-Output "  - $_" }
+                # Silent success
             }
             if ($unprocessedContainers.Count -gt 0) {
                 Write-Output "`n[-] Failed to process containers:"
                 $unprocessedContainers | ForEach-Object { Write-Output "    - $_" }
             }
-        } elseif ($LetterSplitSearch -eq $true -and $SplitSearch -eq $false) {
+            
+            # Report failed letters if any
+            if ($stateEnabled -and $stateData -and $stateData.failedLetters -and $stateData.failedLetters.Count -gt 0) {
+                Write-Output ''
+                Write-Output "[!] WARNING: Failed to enumerate letters for the following containers:"
+                Write-Output ''
+                foreach ($container in $stateData.failedLetters.Keys) {
+                    $letters = $stateData.failedLetters[$container] -join ', '
+                    Write-Output "  Container: $container"
+                    Write-Output "  Failed letters: $letters"
+                    Write-Output ''
+                }
+                Write-Output "[!] Partial or no data written for these letters before failure."
+                Write-Output "[!] State file preserved. Resuming will retry failed letters."
+                Write-Output ''
+                Write-Output "[!] If failures persist, try these manual enumeration strategies:"
+                Write-Output ''
+                Write-Output "  Option 1 - More specific CN filter using -LdapFilter:"
+                Write-Output "    ShadowHound-ADM -Server <server> -SearchBase '<failed-container-DN>' -LdapFilter '(&(objectGuid=*)(cn=2024*))' -OutputFilePath <output>"
+                Write-Output "    # Targets specific year instead of broad '20*' pattern"
+                Write-Output ''
+                Write-Output "  Option 2 - Target a specific sub-OU to reduce scope:"
+                Write-Output "    ShadowHound-ADM -Server <server> -SearchBase 'OU=SubOU,<failed-container-DN>' -OutputFilePath <output>"
+                Write-Output "    # Enumerate one level deeper to reduce object count per query"
+                Write-Output ''
+                Write-Output "  Option 3 - Combine filters and letter splitting:"
+                Write-Output "    ShadowHound-ADM -Server <server> -SearchBase '<failed-container-DN>' -LdapFilter '(&(objectGuid=*)(cn=202*))' -LetterSplitSearch -OutputFilePath <output>"
+                Write-Output "    # Narrow the pattern and still use letter splitting for safety"
+                Write-Output ''
+            }
+        }
+        elseif ($LetterSplitSearch -eq $true -and $SplitSearch -eq $false) {
+            # Top-level charset excludes . and - to avoid garbage queries
             $charset = ([char[]](97..122) + [char[]](48..57) + '!', '_', '@', '$', '{', '}')
+            # Full charset for 2-letter and 3-letter splits includes . and - for edge cases
+            $charsetFull = $charset + '.', '-'
             $OriginalFilter = $getAdObjectParams['LdapFilter']
-            foreach ($char in $charset) {
-                Write-Output "  [*] Querying for objects with CN starting with '$char'"
-                $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$char**))"
+            $globalKey = 'global'
+            
+            $startIdx = 0
+            $completedSet = @()
+            if ($stateEnabled -and $stateData -and $stateData.completedLetters) {
+                $completedSet = @($stateData.completedLetters)
+            }
+            elseif ($StartFromLetter) {
+                for ($i = 0; $i -lt $charset.Length; $i++) {
+                    if ($charset[$i] -eq $StartFromLetter[0]) {
+                        $startIdx = $i
+                        break
+                    }
+                }
+            }
+            
+            foreach ($char in $charset[$startIdx..($charset.Length - 1)]) {
+                $charStr = [string]$char
+                
+                # Skip if already completed
+                if ($completedSet -contains $charStr) {
+                    Write-Output "  [+] Letter '$charStr' already completed, skipping..."
+                    continue
+                }
+                
+                # Check if we have any subletters starting with this letter already completed
+                $hasSubletters = $false
+                foreach ($completed in $completedSet) {
+                    if ($completed.Length -eq 2 -and $completed[0] -eq $char) {
+                        $hasSubletters = $true
+                        break
+                    }
+                }
+                
+                # Handle cases where we need to skip single letter and enumerate subletters:
+                # 1. -StartFromLetter with 2-char prefix
+                # 2. We have subletters in completedSet (resume scenario)
+                if (($StartFromLetter -and $StartFromLetter.Length -eq 2 -and $charStr -eq $StartFromLetter[0]) -or $hasSubletters) {
+                    $subStartIdx = 0
+                    
+                    # Determine starting subletter index
+                    if ($StartFromLetter -and $StartFromLetter.Length -eq 2 -and $charStr -eq $StartFromLetter[0]) {
+                        # User specified a starting subletter
+                        for ($i = 0; $i -lt $charset.Length; $i++) {
+                            if ($charset[$i] -eq $StartFromLetter[1]) {
+                                $subStartIdx = $i
+                                break
+                            }
+                        }
+                        Write-Output "  [*] Starting from double-letter '$StartFromLetter' as requested..."
+                    }
+                    
+                    $subCharset = $charsetFull[$subStartIdx..($charsetFull.Length - 1)]
+                    foreach ($subChar in $subCharset) {
+                        $doubleChar = "$charStr$subChar"
+                        $isRetry = $false
+                        
+                        if ($stateEnabled -and $stateData -and $stateData.failedLetters[$globalKey] -and $stateData.failedLetters[$globalKey] -contains $doubleChar) {
+                            $isRetry = $true
+                            Write-Output "  [*] Retrying previously failed letter '$doubleChar'"
+                        }
+                        
+                        if (($completedSet -contains $doubleChar) -and -not $isRetry) {
+                            Write-Output "    [+] Letter '$doubleChar' already completed, skipping..."
+                            continue
+                        }
+                        
+                        $hasTripleLetters = $false
+                        foreach ($completed in $completedSet) {
+                            if ($completed.Length -eq 3 -and $completed.StartsWith($doubleChar)) {
+                                $hasTripleLetters = $true
+                                break
+                            }
+                        }
+                        
+                        if ($hasTripleLetters) {
+                            Write-Output "    [+] Letter '$doubleChar' has 3-letter subletters, iterating those..."
+                            
+                            # Iterate all 3-letter combinations for this 2-letter prefix
+                            foreach ($tripleChar in $charsetFull) {
+                                $triplePrefix = "$doubleChar$tripleChar"
+                                
+                                # Check if already completed
+                                if ($completedSet -contains $triplePrefix) {
+                                    Write-Output "      [+] Letter '$triplePrefix' already completed, skipping..."
+                                    continue
+                                }
+                                
+                                # Check if in failedLetters and needs retry
+                                $isFailedRetry = $false
+                                if ($stateEnabled -and $stateData -and $stateData.failedLetters[$globalKey] -and $stateData.failedLetters[$globalKey] -contains $triplePrefix) {
+                                    $isFailedRetry = $true
+                                    Write-Output "      [*] Retrying previously failed letter '$triplePrefix'"
+                                }
+                                
+                                if ($isFailedRetry) {
+                                    try {
+                                        $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$triplePrefix*))"
+                                        Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                        
+                                        # Success - add to completed, remove from failed
+                                        if ($stateEnabled -and $stateData) {
+                                            if (-not ($stateData.completedLetters -contains $triplePrefix)) {
+                                                $stateData.completedLetters += $triplePrefix
+                                            }
+                                            $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $triplePrefix })
+                                            if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                                $stateData.failedLetters.Remove($globalKey)
+                                            }
+                                            $stateData.objectCount = $count.Value
+                                            Write-StateFile -State $stateData -Path $statePath
+                                        }
+                                        Write-Output "      [+] Successfully retried '$triplePrefix'"
+                                    }
+                                    catch {
+                                        Write-Output "      [-] Retry failed for '$triplePrefix': $_"
+                                        # Keep in failedLetters for future retry
+                                    }
+                                }
+                            }
+                            
+                            continue
+                        }
+                        
+                        try {
+                            Write-Output "  [*] Querying for objects with CN starting with '$doubleChar'"
+                            $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$doubleChar*))"
+                            Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                            
+                            # Checkpoint after successful subletter query
+                            if ($stateEnabled -and $stateData) {
+                                if (-not ($stateData.completedLetters -contains $doubleChar)) {
+                                    $stateData.completedLetters += $doubleChar
+                                }
+                                
+                                if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $doubleChar) {
+                                    $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $doubleChar })
+                                    if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                        $stateData.failedLetters.Remove($globalKey)
+                                    }
+                                }
+                                
+                                $stateData.objectCount = $count.Value
+                                Write-StateFile -State $stateData -Path $statePath
+                            }
+                        }
+                        catch {
+                            Write-Output "   [-] Failed to process (CN=$doubleChar*): $_"
+                            Write-Output '       Trying to split to 3-letter prefixes...'
+                            
+                            $batchSize = 4
+                            $tripleSuccess = $false
+                            $failedBatches = @()
+                            
+                            for ($batchIdx = 0; $batchIdx -lt $charsetFull.Length; $batchIdx += $batchSize) {
+                                $batchEnd = [Math]::Min($batchIdx + $batchSize - 1, $charsetFull.Length - 1)
+                                $batch = $charsetFull[$batchIdx..$batchEnd]
+                                
+                                $orFilters = @()
+                                foreach ($tripleChar in $batch) {
+                                    $triplePrefix = "$doubleChar$tripleChar"
+                                    $orFilters += "(cn=$triplePrefix*)"
+                                }
+                                
+                                $batchFilter = "(&$OriginalFilter(|$($orFilters -join '')))"
+                                $batchNames = ($batch | ForEach-Object { "$doubleChar$_" }) -join ', '
+                                
+                                try {
+                                    Write-Output "  [*] Querying batch: $batchNames"
+                                    $getAdObjectParams['LdapFilter'] = $batchFilter
+                                    Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                    $tripleSuccess = $true
+                                    
+                                    if ($stateEnabled -and $stateData) {
+                                        foreach ($tripleChar in $batch) {
+                                            $triplePrefix = "$doubleChar$tripleChar"
+                                            if (-not ($stateData.completedLetters -contains $triplePrefix)) {
+                                                $stateData.completedLetters += $triplePrefix
+                                            }
+
+                                            if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $triplePrefix })
+                                                if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                                    $stateData.failedLetters.Remove($globalKey)
+                                                }
+                                            }
+                                        }
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                }
+                                catch {
+                                    Write-Output "   [-] Batch failed - will retry failed batch individually after completing remaining batches"
+
+                                    # Crash-safe: record all triple prefixes in this failed batch for retry.
+                                    if ($stateEnabled -and $stateData) {
+                                        if (-not $stateData.failedLetters[$globalKey]) {
+                                            $stateData.failedLetters[$globalKey] = @()
+                                        }
+                                        foreach ($tripleChar in $batch) {
+                                            $triplePrefix = "$doubleChar$tripleChar"
+                                            if ($stateData.failedLetters[$globalKey] -notcontains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] += $triplePrefix
+                                            }
+                                        }
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                    $failedBatches += , @($batch)
+                                }
+                            }
+                            
+                            foreach ($batch in $failedBatches) {
+                                foreach ($tripleChar in $batch) {
+                                    $triplePrefix = "$doubleChar$tripleChar"
+                                    
+                                    try {
+                                        Write-Output "  [*] Querying for objects with CN starting with '$triplePrefix'"
+                                        $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$triplePrefix*))"
+                                        Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                        $tripleSuccess = $true
+                                        
+                                        if ($stateEnabled -and $stateData) {
+                                            if (-not ($stateData.completedLetters -contains $triplePrefix)) {
+                                                $stateData.completedLetters += $triplePrefix
+                                            }
+
+                                            if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $triplePrefix })
+                                                if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                                    $stateData.failedLetters.Remove($globalKey)
+                                                }
+                                            }
+                                            $stateData.objectCount = $count.Value
+                                            Write-StateFile -State $stateData -Path $statePath
+                                        }
+                                    }
+                                    catch {
+                                        Write-Output "   [-] Failed to process (CN=$triplePrefix*): $_"
+                                        
+                                        if ($stateEnabled -and $stateData) {
+                                            if (-not $stateData.failedLetters[$globalKey]) {
+                                                $stateData.failedLetters[$globalKey] = @()
+                                            }
+                                            if ($stateData.failedLetters[$globalKey] -notcontains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] += $triplePrefix
+                                            }
+                                            $stateData.objectCount = $count.Value
+                                            Write-StateFile -State $stateData -Path $statePath
+                                        }
+                                        continue
+                                    }
+                                }
+                            }
+                            
+                            if ($tripleSuccess -and $stateEnabled -and $stateData) {
+                                if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $doubleChar) {
+                                    $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $doubleChar })
+                                    if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                        $stateData.failedLetters.Remove($globalKey)
+                                    }
+                                    Write-StateFile -State $stateData -Path $statePath
+                                }
+                            }
+                            elseif (-not $tripleSuccess -and $stateEnabled -and $stateData) {
+                                if (-not $stateData.failedLetters[$globalKey]) {
+                                    $stateData.failedLetters[$globalKey] = @()
+                                }
+                                if ($stateData.failedLetters[$globalKey] -notcontains $doubleChar) {
+                                    $stateData.failedLetters[$globalKey] += $doubleChar
+                                }
+                                $stateData.objectCount = $count.Value
+                                Write-StateFile -State $stateData -Path $statePath
+                            }
+                            continue
+                        }
+                    }
+                    continue
+                }
+                
+                Write-Output "  [*] Querying for objects with CN starting with '$charStr'"
+                $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$charStr**))"
 
                 try {
                     Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
-                } catch {
-                    Write-Output "   [!!] Error processing character '$char*': $_"
+                    
+                    # Checkpoint after successful query
+                    if ($stateEnabled -and $stateData) {
+                        $stateData.completedLetters += $charStr
+                        $stateData.objectCount = $count.Value
+                        Write-StateFile -State $stateData -Path $statePath
+                    }
+                }
+                catch {
+                    Write-Output "   [!!] Error processing character '$charStr*': $_"
                     Write-Output '        Trying to split each letter again...'
-                    foreach ($subChar in $charset) {
+                    $subCharset = $charsetFull
+                    foreach ($subChar in $subCharset) {
+                        $doubleChar = "$charStr$subChar"
+                        $isRetry = $false
+                        
+                        if ($stateEnabled -and $stateData -and $stateData.failedLetters[$globalKey] -and $stateData.failedLetters[$globalKey] -contains $doubleChar) {
+                            $isRetry = $true
+                            Write-Output "  [*] Retrying previously failed letter '$doubleChar'"
+                        }
+                        
+                        if (($completedSet -contains $doubleChar) -and -not $isRetry) {
+                            Write-Output "    [+] Letter '$doubleChar' already completed, skipping..."
+                            continue
+                        }
+                        
+                        $hasTripleLetters = $false
+                        foreach ($completed in $completedSet) {
+                            if ($completed.Length -eq 3 -and $completed.StartsWith($doubleChar)) {
+                                $hasTripleLetters = $true
+                                break
+                            }
+                        }
+                        
+                        if ($hasTripleLetters) {
+                            Write-Output "    [+] Letter '$doubleChar' has 3-letter subletters, iterating those..."
+                            
+                            # Iterate all 3-letter combinations for this 2-letter prefix
+                            foreach ($tripleChar in $charsetFull) {
+                                $triplePrefix = "$doubleChar$tripleChar"
+                                
+                                # Check if already completed
+                                if ($completedSet -contains $triplePrefix) {
+                                    Write-Output "      [+] Letter '$triplePrefix' already completed, skipping..."
+                                    continue
+                                }
+                                
+                                # Check if in failedLetters and needs retry
+                                $isFailedRetry = $false
+                                if ($stateEnabled -and $stateData -and $stateData.failedLetters[$globalKey] -and $stateData.failedLetters[$globalKey] -contains $triplePrefix) {
+                                    $isFailedRetry = $true
+                                    Write-Output "      [*] Retrying previously failed letter '$triplePrefix'"
+                                }
+                                
+                                if ($isFailedRetry) {
+                                    try {
+                                        $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$triplePrefix*))"
+                                        Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                        
+                                        # Success - add to completed, remove from failed
+                                        if ($stateEnabled -and $stateData) {
+                                            if (-not ($stateData.completedLetters -contains $triplePrefix)) {
+                                                $stateData.completedLetters += $triplePrefix
+                                            }
+                                            $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $triplePrefix })
+                                            if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                                $stateData.failedLetters.Remove($globalKey)
+                                            }
+                                            $stateData.objectCount = $count.Value
+                                            Write-StateFile -State $stateData -Path $statePath
+                                        }
+                                        Write-Output "      [+] Successfully retried '$triplePrefix'"
+                                    }
+                                    catch {
+                                        Write-Output "      [-] Retry failed for '$triplePrefix': $_"
+                                        # Keep in failedLetters for future retry
+                                    }
+                                }
+                            }
+                            
+                            continue
+                        }
+                        
                         try {
-                            Write-Output "  [*] Querying for objects with CN starting with '$char$subChar'"
-                            $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$char$subChar**))"
+                            Write-Output "  [*] Querying for objects with CN starting with '$doubleChar'"
+                            $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$doubleChar**))"
                             Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
-                        } catch {
-                            Write-Output "   [-] Failed to process (CN=$char$subChar*): $_"
-                            Write-Output '       Moving to the next sub letter...'
+                            
+                            # Checkpoint after successful subletter query
+                            if ($stateEnabled -and $stateData) {
+                                if (-not ($stateData.completedLetters -contains $doubleChar)) {
+                                    $stateData.completedLetters += $doubleChar
+                                }
+                                
+                                if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $doubleChar) {
+                                    $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $doubleChar })
+                                    if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                        $stateData.failedLetters.Remove($globalKey)
+                                    }
+                                }
+                                
+                                $stateData.objectCount = $count.Value
+                                Write-StateFile -State $stateData -Path $statePath
+                            }
+                        }
+                        catch {
+                            Write-Output "   [-] Failed to process (CN=$doubleChar*): $_"
+                            Write-Output '       Trying to split to 3-letter prefixes...'
+                            
+                            $batchSize = 4
+                            $tripleSuccess = $false
+                            $failedBatches = @()
+                            
+                            for ($batchIdx = 0; $batchIdx -lt $charsetFull.Length; $batchIdx += $batchSize) {
+                                $batchEnd = [Math]::Min($batchIdx + $batchSize - 1, $charsetFull.Length - 1)
+                                $batch = $charsetFull[$batchIdx..$batchEnd]
+                                
+                                $orFilters = @()
+                                foreach ($tripleChar in $batch) {
+                                    $triplePrefix = "$doubleChar$tripleChar"
+                                    $orFilters += "(cn=$triplePrefix*)"
+                                }
+                                
+                                $batchFilter = "(&$OriginalFilter(|$($orFilters -join '')))"
+                                $batchNames = ($batch | ForEach-Object { "$doubleChar$_" }) -join ', '
+                                
+                                try {
+                                    Write-Output "  [*] Querying batch: $batchNames"
+                                    $getAdObjectParams['LdapFilter'] = $batchFilter
+                                    Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                    $tripleSuccess = $true
+                                    
+                                    if ($stateEnabled -and $stateData) {
+                                        foreach ($tripleChar in $batch) {
+                                            $triplePrefix = "$doubleChar$tripleChar"
+                                            if (-not ($stateData.completedLetters -contains $triplePrefix)) {
+                                                $stateData.completedLetters += $triplePrefix
+                                            }
+
+                                            if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $triplePrefix })
+                                                if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                                    $stateData.failedLetters.Remove($globalKey)
+                                                }
+                                            }
+                                        }
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                }
+                                catch {
+                                    Write-Output "   [-] Batch failed - will retry failed batch individually after completing remaining batches"
+
+                                    # Crash-safe: record all triple prefixes in this failed batch for retry.
+                                    if ($stateEnabled -and $stateData) {
+                                        if (-not $stateData.failedLetters[$globalKey]) {
+                                            $stateData.failedLetters[$globalKey] = @()
+                                        }
+                                        foreach ($tripleChar in $batch) {
+                                            $triplePrefix = "$doubleChar$tripleChar"
+                                            if ($stateData.failedLetters[$globalKey] -notcontains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] += $triplePrefix
+                                            }
+                                        }
+                                        $stateData.objectCount = $count.Value
+                                        Write-StateFile -State $stateData -Path $statePath
+                                    }
+                                    $failedBatches += , @($batch)
+                                }
+                            }
+                            
+                            foreach ($batch in $failedBatches) {
+                                foreach ($tripleChar in $batch) {
+                                    $triplePrefix = "$doubleChar$tripleChar"
+                                    
+                                    try {
+                                        Write-Output "  [*] Querying for objects with CN starting with '$triplePrefix'"
+                                        $getAdObjectParams['LdapFilter'] = "(&$OriginalFilter(cn=$triplePrefix*))"
+                                        Perform-ADQuery -SearchParams $getAdObjectParams -StreamWriter $streamWriter -Count $count -PrintingThreshold $printingThreshold
+                                        $tripleSuccess = $true
+                                        
+                                        if ($stateEnabled -and $stateData) {
+                                            if (-not ($stateData.completedLetters -contains $triplePrefix)) {
+                                                $stateData.completedLetters += $triplePrefix
+                                            }
+
+                                            if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $triplePrefix })
+                                                if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                                    $stateData.failedLetters.Remove($globalKey)
+                                                }
+                                            }
+                                            $stateData.objectCount = $count.Value
+                                            Write-StateFile -State $stateData -Path $statePath
+                                        }
+                                    }
+                                    catch {
+                                        Write-Output "   [-] Failed to process (CN=$triplePrefix*): $_"
+                                        
+                                        if ($stateEnabled -and $stateData) {
+                                            if (-not $stateData.failedLetters[$globalKey]) {
+                                                $stateData.failedLetters[$globalKey] = @()
+                                            }
+                                            if ($stateData.failedLetters[$globalKey] -notcontains $triplePrefix) {
+                                                $stateData.failedLetters[$globalKey] += $triplePrefix
+                                            }
+                                            $stateData.objectCount = $count.Value
+                                            Write-StateFile -State $stateData -Path $statePath
+                                        }
+                                        continue
+                                    }
+                                }
+                            }
+                            
+                            if ($tripleSuccess -and $stateEnabled -and $stateData) {
+                                if ($stateData.failedLetters.ContainsKey($globalKey) -and $stateData.failedLetters[$globalKey] -contains $doubleChar) {
+                                    $stateData.failedLetters[$globalKey] = @($stateData.failedLetters[$globalKey] | Where-Object { $_ -ne $doubleChar })
+                                    if ($stateData.failedLetters[$globalKey].Count -eq 0) {
+                                        $stateData.failedLetters.Remove($globalKey)
+                                    }
+                                    Write-StateFile -State $stateData -Path $statePath
+                                }
+                            }
+                            elseif (-not $tripleSuccess -and $stateEnabled -and $stateData) {
+                                if (-not $stateData.failedLetters[$globalKey]) {
+                                    $stateData.failedLetters[$globalKey] = @()
+                                }
+                                if ($stateData.failedLetters[$globalKey] -notcontains $doubleChar) {
+                                    $stateData.failedLetters[$globalKey] += $doubleChar
+                                }
+                                $stateData.objectCount = $count.Value
+                                Write-StateFile -State $stateData -Path $statePath
+                            }
                             continue
                         }
                     }
                 }
+            }
+            
+            if ($stateEnabled -and $stateData -and $stateData.failedLetters -and $stateData.failedLetters.Count -gt 0) {
+                Write-Output ''
+                Write-Output "[!] WARNING: Failed to enumerate the following letters:"
+                if ($stateData.failedLetters[$globalKey]) {
+                    $letters = $stateData.failedLetters[$globalKey] -join ', '
+                    Write-Output "  Failed letters: $letters"
+                }
+                Write-Output ''
+                Write-Output "[!] Partial or no data written for these letters before failure."
+                Write-Output "[!] State file preserved. Resuming will retry failed letters."
+                Write-Output ''
+                Write-Output "[!] If failures persist, try these manual enumeration strategies:"
+                Write-Output ''
+                Write-Output "  Option 1 - More specific CN filter using -LdapFilter:"
+                Write-Output "    ShadowHound-ADM -Server <server> -SearchBase '<search-base>' -LdapFilter '(&(objectGuid=*)(cn=2024*))' -OutputFilePath <output>"
+                Write-Output "    # Targets specific year instead of broad '20*' pattern"
+                Write-Output ''
+                Write-Output "  Option 2 - Target a specific sub-OU to reduce scope:"
+                Write-Output "    ShadowHound-ADM -Server <server> -SearchBase 'OU=SubOU,<search-base>' -OutputFilePath <output>"
+                Write-Output "    # Enumerate one level deeper to reduce object count per query"
+                Write-Output ''
+                Write-Output "  Option 3 - Combine filters and letter splitting:"
+                Write-Output "    ShadowHound-ADM -Server <server> -SearchBase '<search-base>' -LdapFilter '(&(objectGuid=*)(cn=202*))' -LetterSplitSearch -OutputFilePath <output>"
+                Write-Output "    # Narrow the pattern and still use letter splitting for safety"
+                Write-Output ''
             }
         }
 
 
         $summaryLine = "Retrieved $($count.Value) results total"
         $streamWriter.WriteLine($summaryLine)
-    } finally {
+    }
+    finally {
         $streamWriter.Flush()
         $streamWriter.Close()
+    }
+
+    # State cleanup on completion
+    if ($stateEnabled -and $statePath -and -not $KeepStateFile) {
+        # Only remove state file if no failures occurred (letter or container)
+        $failedContainerCount = if ($stateData -and $stateData.failedContainers) { $stateData.failedContainers.Count } else { 0 }
+        $failedLetterCount = if ($stateData -and $stateData.failedLetters) { $stateData.failedLetters.Count } else { 0 }
+        $hasFailures = ($failedLetterCount -gt 0) -or ($failedContainerCount -gt 0)
+
+        if ($hasFailures) {
+            Write-Output "[*] State file preserved due to failed items ($failedContainerCount containers, $failedLetterCount letters): $statePath"
+        }
+        else {
+            Write-Output '[*] Enumeration complete, removing state file...'
+            Remove-StateFile -Path $statePath
+        }
+    }
+    elseif ($stateEnabled -and $KeepStateFile) {
+        Write-Output '[*] State file preserved:' $statePath
     }
 
     Write-Output "Objects have been processed and written to $OutputFilePath"
     Write-Output $summaryLine
     Write-Output '==================================================='
+
 
     # Handle recursion if necessary
     if ($Recurse -and $unprocessedContainers.Count -gt 0) {
@@ -304,6 +1259,7 @@ function ShadowHound-ADM {
             if ($LetterSplitSearch) {
                 $recurseParams['LetterSplitSearch'] = $true
             }
+
 
             Write-Output "[+] Attempting to recurse $failedContainer"
             ShadowHound-ADM @recurseParams
@@ -332,7 +1288,7 @@ function Print-Help {
 ShadowHound-ADM Help
 
 SYNTAX:
-    ShadowHound-ADM [-Server <string>] -OutputFilePath <string> [-LdapFilter <string>] [-SearchBase <string>] [-PageSize <int>] [-Credential <pscredential>] [-SplitSearch] [-LetterSplitSearch] [-ParsedContainers <string>] [-Recurse] [-Help]
+    ShadowHound-ADM [-Server <string>] -OutputFilePath <string> [-LdapFilter <string>] [-SearchBase <string>] [-PageSize <int>] [-Credential <pscredential>] [-SplitSearch] [-LetterSplitSearch] [-ParsedContainers <string>] [-Recurse] [-Certificates] [-StateFile <string>] [-StartFromLetter <string>] [-DisableStateFile] [-KeepStateFile] [-Help]
 
 PARAMETERS:
     -Help
@@ -373,6 +1329,23 @@ PARAMETERS:
     -Recurse [Optional]
         Recursively process containers that fail.
 
+    -StateFile <string> [Optional]
+        Path to state file for checkpoint tracking.
+        If not specified, defaults to <OutputFilePath>.state.json.
+
+    -StartFromLetter <string> [Optional]
+        Start enumeration from a specific letter (max 2 chars).
+        Examples: "d", "ah", "@"
+        Skips all letters before the specified starting point.
+
+    -DisableStateFile [Optional]
+        Disable state file functionality entirely.
+        No checkpoints created, no resume capability.
+
+    -KeepStateFile [Optional]
+        Preserve state file after successful completion.
+        By default, state file is automatically deleted on completion.
+
 EXAMPLES:
     # Example 1: Basic usage with required parameter
     ShadowHound-ADM -OutputFilePath "C:\Results\output.txt"
@@ -389,6 +1362,15 @@ EXAMPLES:
 
     # Example 5: Enumerate certificates
     ShadowHound-ADM -OutputFilePath "C:\Results\output.txt" -Certificates
+
+    # Example 6: Resume after interruption (auto-detects state file)
+    ShadowHound-ADM -OutputFilePath "C:\Results\output.txt" -LetterSplitSearch
+
+    # Example 7: Start from specific letter
+    ShadowHound-ADM -OutputFilePath "C:\Results\output.txt" -LetterSplitSearch -StartFromLetter "m"
+
+    # Example 8: Disable state file for zero artifacts
+    ShadowHound-ADM -OutputFilePath "C:\Results\output.txt" -LetterSplitSearch -DisableStateFile
 '
     Write-Host $helpMessage
     return
@@ -550,7 +1532,8 @@ function Process-AdObject {
             'objectClass' {
                 if ($objectClassMapping.ContainsKey($value)) {
                     $formattedObjectClass = $objectClassMapping[$value]
-                } else {
+                }
+                else {
                     $formattedObjectClass = ($value -join ', ')
                 }
                 $outputLines.Add("$name`: $formattedObjectClass")
@@ -561,15 +1544,18 @@ function Process-AdObject {
                     # Format date/time attributes in LDAP time format
                     $formattedValue = '{0:yyyyMMddHHmmss.0Z}' -f $value.ToUniversalTime()
                     $outputLines.Add("$name`: $formattedValue")
-                } elseif ($isByteArray) {
+                }
+                elseif ($isByteArray) {
                     # Base64 encode byte arrays
                     if ($value.Length -gt 0) {
                         $base64Value = [System.Convert]::ToBase64String($value)
                         $outputLines.Add("$name`: $base64Value")
                     }
-                } elseif ($isGuid) {
+                }
+                elseif ($isGuid) {
                     $outputLines.Add("$name`: $value")
-                } elseif ($isCollection) {
+                }
+                elseif ($isCollection) {
                     switch ($name) {
                         'dSCorePropagationData' {
                             # Efficiently find the latest date
@@ -611,7 +1597,8 @@ function Process-AdObject {
                             break
                         }
                     }
-                } else {
+                }
+                else {
                     # General handling for other types
                     $outputLines.Add("$name`: $value")
                 }
@@ -642,15 +1629,17 @@ function Perform-ADQuery {
         [int]$PrintingThreshold = 1000
     )
 
-    # Process the objects
+    $SearchParams['ResultSetSize'] = 100000
+
     Get-ADObject @SearchParams | ForEach-Object {
         Process-AdObject -AdObject $_ -StreamWriter $StreamWriter
         $Count.Value++
         if ($Count.Value % $PrintingThreshold -eq 0) {
             Write-Output "      [**] Queried $($Count.Value) objects so far..."
-            $StreamWriter.Flush()
         }
     }
+    
+    $StreamWriter.Flush()
 }
 
 function Get-TopLevelContainers {
@@ -665,8 +1654,263 @@ function Get-TopLevelContainers {
         $topLevelParams['SearchScope'] = 'OneLevel'
         $TopLevelContainers = Get-ADObject @topLevelParams 
         return $TopLevelContainers
-    } catch {
+    }
+    catch {
         Write-Error "Failed to retrieve top-level containers: $_"
         return $null
+    }
+}
+
+function Initialize-StateFile {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Output,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Server,
+
+        [Parameter(Mandatory = $false)]
+        [string]$LdapFilter,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SearchBase,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$SplitSearch = $false,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$LetterSplitSearch = $false
+    )
+
+    # Determine execution mode
+    $mode = 'Standard'
+    if ($SplitSearch -and $LetterSplitSearch) {
+        $mode = 'SplitSearch+LetterSplitSearch'
+    }
+    elseif ($SplitSearch) {
+        $mode = 'SplitSearch'
+    }
+    elseif ($LetterSplitSearch) {
+        $mode = 'LetterSplitSearch'
+    }
+
+    $state = @{
+        version             = '1.0'
+        toolMethod          = 'ShadowHound-ADM'
+        timestamp           = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        outputFile          = $Output
+        executionMode       = $mode
+        ldapFilter          = if ($LdapFilter) { $LdapFilter } else { '(objectGuid=*)' }
+        completedContainers = @()
+        failedContainers    = @()
+        completedLetters    = @()
+        failedLetters       = @{}
+        objectCount         = 0
+    }
+
+    if ($Server) { $state.server = $Server }
+    if ($SearchBase) { $state.searchBase = $SearchBase }
+
+    return $state
+}
+
+function Test-StateFileExists {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return (Test-Path -Path $Path -PathType Leaf)
+}
+
+function Read-StateFile {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $json = Get-Content -Path $Path -Raw -ErrorAction Stop
+        $psobject = $json | ConvertFrom-Json -ErrorAction Stop
+        
+        $state = @{}
+        $psobject.PSObject.Properties | ForEach-Object {
+            $name = $_.Name
+            $value = $_.Value
+            
+            if ($value -is [PSCustomObject]) {
+                $nested = @{}
+                $value.PSObject.Properties | ForEach-Object {
+                    $nested[$_.Name] = $_.Value
+                }
+                $state[$name] = $nested
+            }
+            else {
+                $state[$name] = $value
+            }
+        }
+        
+        return $state
+    }
+    catch {
+        return $null
+    }
+}
+
+function Write-StateFile {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $State.timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $json = $State | ConvertTo-Json -Depth 10
+        
+        # Custom compaction for letters only
+        try {
+            # specific regex to compact completedLetters and failedLetters values only
+            $json = [regex]::Replace($json, '(?ms)"(completedLetters|failedLetters)":\s*\[(.*?)\]', {
+                    param($match)
+                    $key = $match.Groups[1].Value
+                    $content = $match.Groups[2].Value
+                    # Compact the array content
+                    $compacted = $content -replace '\s+', ''
+                    "`"$key`": [$compacted]"
+                })
+        }
+        catch {
+            # Regex failed, use formatted JSON
+        }
+
+        
+        $json | Set-Content -Path $Path -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Error "[-] Failed to write state file: $_"
+    }
+}
+
+function Remove-StateFile {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (Test-Path -Path $Path) {
+        try {
+            Remove-Item -Path $Path -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Error "[-] Failed to remove state file: $_"
+        }
+    }
+}
+
+function Show-StatePrompt {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        $State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    [Console]::WriteLine('')
+    [Console]::WriteLine('[*] Found existing state file: ' + $Path)
+    [Console]::WriteLine('[*] Last checkpoint:')
+    
+    $containers = $State['completedContainers']
+    if ($containers -and $containers.Count -gt 0) {
+        [Console]::WriteLine("    - Completed containers: $($containers.Count)")
+    }
+    
+    $currentContainer = $State['currentContainer']
+    if ($currentContainer) {
+        [Console]::WriteLine("    - Current container: $currentContainer")
+    }
+    
+    $letters = $State['completedLetters']
+    if ($letters -and $letters.Count -gt 0) {
+        $letterList = $letters -join ', '
+        if ($currentContainer) {
+            [Console]::WriteLine("    - Completed letters (in current container): $letterList")
+        }
+        else {
+            [Console]::WriteLine("    - Completed letters: $letterList")
+        }
+    }
+    elseif ($currentContainer) {
+        [Console]::WriteLine('    - Completed letters (in current container): (none yet)')
+    }
+    else {
+        [Console]::WriteLine('    - Completed letters: (none yet)')
+    }
+    
+    $objCount = $State['objectCount']
+    if ($objCount -and $objCount -gt 0) {
+        [Console]::WriteLine("    - Objects enumerated: $objCount")
+    }
+    
+    $failedContainers = $State['failedContainers']
+    if ($failedContainers -and $failedContainers.Count -gt 0) {
+        [Console]::WriteLine('')
+        [Console]::WriteLine('[!] Failed containers detected (will be retried on resume):')
+        foreach ($fc in $failedContainers) {
+            [Console]::WriteLine("    - $fc")
+        }
+    }
+
+    $failedLetters = $State['failedLetters']
+    if ($failedLetters -and $failedLetters.Count -gt 0) {
+        [Console]::WriteLine('')
+        [Console]::WriteLine('[!] Failed letters detected (will be retried on resume):')
+        foreach ($container in $failedLetters.Keys) {
+            $letters = $failedLetters[$container] -join ', '
+            [Console]::WriteLine("    Container: $container")
+            [Console]::WriteLine("    Letters: $letters")
+        }
+    }
+    
+    $timestamp = $State['timestamp']
+    if ($timestamp) {
+        [Console]::WriteLine("    - Timestamp: $timestamp")
+    }
+    
+    [Console]::WriteLine('')
+    [Console]::WriteLine('[!] Note: Resuming will append to existing output file')
+    [Console]::WriteLine('')
+
+    while ($true) {
+        $choice = Read-Host '[?] Resume from checkpoint? [Y]es, [N]o, [C]ancel'
+        $choice = $choice.Trim().ToUpper()
+        
+        if ($choice -eq 'Y' -or $choice -eq 'YES') {
+            [Console]::WriteLine('[+] Resuming from checkpoint...')
+            return 'Y'
+        }
+        elseif ($choice -eq 'N' -or $choice -eq 'NO') {
+            [Console]::WriteLine('[+] Starting fresh enumeration...')
+            return 'N'
+        }
+        elseif ($choice -eq 'C' -or $choice -eq 'CANCEL') {
+            [Console]::WriteLine('[-] Cancelled by user')
+            return 'C'
+        }
+        else {
+            [Console]::WriteLine('[!] Invalid input. Please enter Y, N, or C.')
+        }
     }
 }

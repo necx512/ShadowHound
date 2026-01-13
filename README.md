@@ -22,6 +22,8 @@ Huge thanks to [Itay Yashar](https://www.linkedin.com/in/itay-yashar-55586a163/)
 - **Features**:
   - Handles large domains with `-SplitSearch`, `-Recurse`, and `-LetterSplitSearch` options.
   - Enumerates certificates with the `-Certificates` flag.
+  - **Resumable enumeration** - Automatic checkpointing that survives interruptions.
+  - **3-letter splitting** - Handles dense prefixes that timeout at 2-letter level.
 
 ### ShadowHound-DS.ps1
 
@@ -85,23 +87,44 @@ ShadowHound-ADM -OutputFilePath "C:\Results\ldap_output.txt" -SplitSearch -Lette
 - **`-Recurse`**: Recurses into containers that fail to return results.
 - **`-LetterSplitSearch`**: Further splits searches by the first letter of CN.
 
+### Resumable Enumeration (ShadowHound-ADM.ps1)
+
+Enumeration automatically saves progress. If interrupted (network drop, Ctrl+C, session killed), just run the same command again - it picks up where it left off.
+
+```powershell
+# Start enumeration
+ShadowHound-ADM -Server dc.corp.local -OutputFilePath output.txt -LetterSplitSearch
+
+# Gets interrupted...
+
+# Resume automatically
+ShadowHound-ADM -Server dc.corp.local -OutputFilePath output.txt -LetterSplitSearch
+```
+
+**New parameters:**
+- **`-DisableStateFile`**: No checkpoints (OPSEC - no artifacts)
+- **`-StartFromLetter <char>`**: Skip ahead (e.g. `-StartFromLetter "m"`)
+- **`-KeepStateFile`**: Preserve state file after completion
+- **`-StateFile <path>`**: Custom state file location
+
+For more details on resumable enumeration and 3-letter splitting, see the [feature PR](https://github.com/Friends-Security/ShadowHound/pull/4).
+
 ## Converting Data for BloodHound
 
 If the ldap_output.txt you got using ShadowHound is too large for Bofhound (Memory error), you may split the ShadowHound output using split_output.py:
 ```bash
 # Split ldap_output.txt to 100 chunks which are named split_output_1.txt, split_output_2.txt and so on...
-# In order to provide bofhound with a folder containing ldap output, the files *must* be prefixed with "pyldapsearch".
+# In order to provide bofhound with a folder containing ldap output, the files *must* be with .log extension.
 python3 split_output.py -i ldap_output.txt -o pyldapsearch_ldap -n 100
 
 # Provide Shadowhound with a folder containing the splitted output
 python3 bofhound.py -i ./folder -p All --parser ldapsearch
-
 ```
 
 After collecting data, use [BofHound](https://github.com/coffeegist/bofhound) to convert it into BloodHound-compatible JSON files:
 
 ```bash
-python3 bofhound.py -i ldap_output.txt -p All --parser ldapsearch
+python3 bofhound.py -i ldap_output.log -p All --parser ldapsearch
 ```
 
 For large JSON files (>100MB), consider splitting them with tools like [ShredHound](https://github.com/ustayready/ShredHound).
