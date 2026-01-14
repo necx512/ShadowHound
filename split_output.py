@@ -61,7 +61,7 @@ def split_large_file_into_chunks(input_file, base_output_name, num_chunks):
 
 
 def write_chunk_to_file(chunk_lines, base_output_name, chunk_index, chunk_object_count):
-    output_file = f"{base_output_name}_chunk_{chunk_index}.log"
+    output_file = f"{base_output_name}_chunk_{chunk_index}.txt"
     with open(output_file, "w", encoding="utf-8-sig") as outfile:
         # Write the starting delimiter
         outfile.write(f"{object_delimiter}\n{object_delimiter}\n")
